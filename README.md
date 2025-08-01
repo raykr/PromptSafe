@@ -2,6 +2,8 @@
 
 ## 🔍 Introduction
 
+![PromptSafe](./assets/framework.png)
+
 **PromptSafe** is a gated prompt tuning framework that enables robust and adaptive defense against harmful content generation in **text-to-image (T2I)** diffusion models, such as Stable Diffusion. While prior moderation efforts use static, curated soft prompts trained on expensive image-text datasets, they suffer from:
 
 * High human cost due to manual data construction,
