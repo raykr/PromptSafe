@@ -60,6 +60,7 @@ bash scripts/train.sh
 ```
 
 * Please note that you need to replace the ` MODEL_PATH ` and ` CLIP_MODEL_PATH ` in the file with the local model path by yourself.
+* All trained models will be saved in the `./out` directory.
 
 ### Step 2: Train Gated Control Network
 
