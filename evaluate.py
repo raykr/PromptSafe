@@ -1,11 +1,11 @@
 import os
 import argparse
 import torch
-from diffusers import StableDiffusionPipeline, DPMSolverMultistepScheduler, StableDiffusionPipelineSafe, StableDiffusion3Pipeline, StableDiffusionXLPipeline
+from diffusers import StableDiffusionPipeline, DPMSolverMultistepScheduler, StableDiffusionPipelineSafe, StableDiffusion3Pipeline, StableDiffusionXLPipeline, FluxPipeline
 from tqdm import tqdm
 import pandas as pd
 from typing import List, Optional
-from transformers import CLIPTokenizer
+from transformers import CLIPTokenizer, T5Tokenizer
 import numpy as np
 import random
 from abc import ABC
@@ -14,7 +14,7 @@ import torch
 from lightning import Fabric
 from model import Prompt_Classifier, Contra_Classifier
 from diffusers import BitsAndBytesConfig, SD3Transformer2DModel
-from sld import SLDPipeline
+# from sld import SLDPipeline
 from safetensors.torch import load_file
 import yaml
 from argparse import Namespace
@@ -199,7 +199,7 @@ class Predictor:
         if not as_json:
             return prob_np.tolist()
         # 获取类别名
-        from yx_trival.utils.dataset_utils import prompt_class
+        from utils.dataset_utils import prompt_class
         idx2name = [k for k, v in sorted(prompt_class.items(), key=lambda x: x[1])]
         result = []
         for row in prob_np:
@@ -214,7 +214,7 @@ class BaseInferencePipeline(ABC):
         self.args = args
         self.model_path = args.model_path
         self.device = device
-        self.tokenizer = CLIPTokenizer.from_pretrained("/home/raykr/models/openai/clip-vit-large-patch14")
+        self.tokenizer = CLIPTokenizer.from_pretrained("/home/beihang/jzl/models/openai/clip-vit-large-patch14")
         self.pipe = None
         self.safety_config = None
         self.setup_pipeline()
@@ -403,25 +403,25 @@ class MACEPipeline(BaseInferencePipeline):
         self.pipe.scheduler = DPMSolverMultistepScheduler.from_config(self.pipe.scheduler.config)
 
 
-class SLD_Pipeline(BaseInferencePipeline):
-    def __init__(self, args, device: str = "cuda", safety_config="MAX"):
-        super().__init__(args, device)
+# class SLD_Pipeline(BaseInferencePipeline):
+#     def __init__(self, args, device: str = "cuda", safety_config="MAX"):
+#         super().__init__(args, device)
 
-        if safety_config == "MAX":
-            self.safety_config = SafetyConfig.MAX
-        elif safety_config == "WEAK":
-            self.safety_config = SafetyConfig.WEAK
-        elif safety_config == "STRONG":
-            self.safety_config = SafetyConfig.STRONG
-        elif safety_config == "MEDIUM":
-            self.safety_config = SafetyConfig.MEDIUM
+#         if safety_config == "MAX":
+#             self.safety_config = SafetyConfig.MAX
+#         elif safety_config == "WEAK":
+#             self.safety_config = SafetyConfig.WEAK
+#         elif safety_config == "STRONG":
+#             self.safety_config = SafetyConfig.STRONG
+#         elif safety_config == "MEDIUM":
+#             self.safety_config = SafetyConfig.MEDIUM
 
-    def setup_pipeline(self):
-        self.pipe = SLDPipeline.from_pretrained(self.model_path).to(self.device)
-        # 移除安全检查器
-        def dummy_checker(images, **kwargs):
-            return images, [False] * len(images)
-        self.pipe.safety_checker = dummy_checker
+#     def setup_pipeline(self):
+#         self.pipe = SLDPipeline.from_pretrained(self.model_path).to(self.device)
+#         # 移除安全检查器
+#         def dummy_checker(images, **kwargs):
+#             return images, [False] * len(images)
+#         self.pipe.safety_checker = dummy_checker
 
 
 class UCEPipeline(BaseInferencePipeline):
@@ -591,6 +591,261 @@ class OursDynamicPipeline(OursPipeline):
                 img.save(os.path.join(output_dir, f"{img_id}.png"))
 
 
+class BaselineFluxPipeline(BaseInferencePipeline):
+    """Flux版本的baseline pipeline，不加载任何防御embeddings"""
+    
+    def __init__(self, args, device: str = "cuda"):
+        # Baseline不需要safe_embedding_paths和safe_tokens，设置为空避免报错
+        if not hasattr(args, "safe_embedding_paths") or args.safe_embedding_paths is None:
+            args.safe_embedding_paths = []
+        if not hasattr(args, "safe_tokens") or args.safe_tokens is None:
+            args.safe_tokens = []
+        super().__init__(args, device)
+    
+    def setup_pipeline(self):
+        """设置Flux pipeline"""
+        self.pipe = FluxPipeline.from_pretrained(
+            self.model_path,
+            torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
+        )
+        self.pipe = self.pipe.to(self.device)
+        
+        # 移除安全检查器（如果存在）
+        if hasattr(self.pipe, "safety_checker"):
+            def dummy_checker(images, **kwargs):
+                return images, [False] * len(images)
+            self.pipe.safety_checker = dummy_checker
+    
+    def load_defense_embeddings(self):
+        """Baseline不加载任何防御embeddings"""
+        pass
+    
+    def process_prompt(self, prompt: str) -> str:
+        """处理prompt，不添加任何防御token"""
+        # Flux使用dual encoder，优先使用T5 tokenizer（如果存在）
+        if hasattr(self.pipe, "tokenizer_2") and hasattr(self.pipe, "text_encoder_2"):
+            tokenizer = self.pipe.tokenizer_2
+            # T5支持512 tokens
+            max_length = 512
+        else:
+            tokenizer = self.pipe.tokenizer
+            # CLIP支持77 tokens
+            max_length = 77
+        
+        tokenized = tokenizer(prompt, truncation=True, max_length=max_length, return_tensors="pt")
+        return tokenizer.decode(tokenized["input_ids"][0], skip_special_tokens=True)
+
+
+class OursFluxPipeline(BaseInferencePipeline):
+    """Flux版本的OursPipeline，支持加载textual inversion embeddings"""
+    
+    def __init__(self, args, device: str = "cuda"):
+        self.safe_embedding_paths = args.safe_embedding_paths
+        self.safe_tokens = args.safe_tokens
+        self.position = args.position
+
+        if len(self.safe_embedding_paths) != len(self.safe_tokens):
+            raise ValueError("Number of safe embedding paths must match number of safe tokens")
+        
+        super().__init__(args, device)
+    
+    def setup_pipeline(self):
+        """设置Flux pipeline"""
+        self.pipe = FluxPipeline.from_pretrained(
+            self.model_path,
+            torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
+        )
+        self.pipe = self.pipe.to(self.device)
+        
+        # 移除安全检查器（如果存在）
+        if hasattr(self.pipe, "safety_checker"):
+            def dummy_checker(images, **kwargs):
+                return images, [False] * len(images)
+            self.pipe.safety_checker = dummy_checker
+    
+    def load_defense_embeddings(self):
+        """加载防御embeddings到Flux pipeline"""
+        # Flux使用dual encoder，需要确定使用哪个text encoder
+        # 根据训练代码，我们训练的是T5 encoder（text_encoder_2）的embeddings
+        # 优先尝试加载到text_encoder_2（T5）
+        if hasattr(self.pipe, "text_encoder_2") and hasattr(self.pipe, "tokenizer_2"):
+            try:
+                # 加载到T5 encoder
+                self.pipe.load_textual_inversion(
+                    self.safe_embedding_paths, 
+                    token=self.safe_tokens,
+                    text_encoder=self.pipe.text_encoder_2,
+                    tokenizer=self.pipe.tokenizer_2,
+                )
+                print(f"Successfully loaded textual inversion to text_encoder_2 (T5)")
+            except Exception as e:
+                print(f"Warning: Failed to load to text_encoder_2, trying text_encoder: {e}")
+                # 如果失败，尝试加载到text_encoder（CLIP）
+                self.pipe.load_textual_inversion(
+                    self.safe_embedding_paths,
+                    token=self.safe_tokens,
+                )
+        else:
+            # 如果没有text_encoder_2，直接加载到text_encoder
+            self.pipe.load_textual_inversion(
+                self.safe_embedding_paths,
+                token=self.safe_tokens,
+            )
+    
+    def process_prompt(self, prompt: str) -> str:
+        """处理prompt，添加安全token"""
+        # Flux使用dual encoder，优先使用T5 tokenizer（如果存在）
+        if hasattr(self.pipe, "tokenizer_2") and hasattr(self.pipe, "text_encoder_2"):
+            tokenizer = self.pipe.tokenizer_2
+            # T5支持512 tokens
+            max_length_default = 512
+        else:
+            tokenizer = self.pipe.tokenizer
+            # CLIP支持77 tokens
+            max_length_default = 77
+        
+        # 计算需要保留的token数量
+        safe_tokens_length = len(self.safe_tokens)
+        max_length = max_length_default - safe_tokens_length
+        
+        tokenized = tokenizer(prompt, truncation=True, max_length=max_length, return_tensors="pt")
+        base_prompt = tokenizer.decode(tokenized["input_ids"][0], skip_special_tokens=True)
+        
+        if self.position == "start":
+            return f"{' '.join(self.safe_tokens)} {base_prompt}"
+        else:
+            return f"{base_prompt} {' '.join(self.safe_tokens)}"
+
+
+class OursDynamicFluxPipeline(OursFluxPipeline):
+    """Flux版本的动态推理pipeline，基于动态插值的soft prompts"""
+    
+    def __init__(self, args, device: str = "cuda"):
+        self.predictor = Predictor(args.predictor_path)
+        
+        super().__init__(args, device)
+        
+        # 获取token ids和embedding层 - 优先使用text_encoder_2（T5）
+        if hasattr(self.pipe, "text_encoder_2") and hasattr(self.pipe, "tokenizer_2"):
+            # 使用T5 encoder和tokenizer
+            self.tokenizer = self.pipe.tokenizer_2
+            self.text_encoder = self.pipe.text_encoder_2
+            print("Using text_encoder_2 (T5) for dynamic pipeline")
+        else:
+            # 回退到CLIP encoder和tokenizer
+            self.tokenizer = self.pipe.tokenizer
+            self.text_encoder = self.pipe.text_encoder
+            print("Using text_encoder (CLIP) for dynamic pipeline")
+        
+        self.token_ids = self.tokenizer.convert_tokens_to_ids(args.safe_tokens)
+        self.embedding_layer = self.text_encoder.get_input_embeddings()
+        
+        # 保存通过textual inversion加载的embedding（强防御）
+        self.soft_embedding = self.embedding_layer.weight[self.token_ids].detach().clone().to(device)
+        
+        # 构建"弱防御"版本：可以使用零向量或随机初始化
+        self.original_embedding = torch.zeros_like(self.soft_embedding)
+    
+    def process_prompt(self, prompt: str, add_soft_token: bool = True) -> str:
+        """处理prompt，可选择是否添加soft token"""
+        # 使用保存的tokenizer（已在__init__中确定）
+        # T5支持512 tokens，CLIP支持77 tokens
+        max_length_default = 512 if hasattr(self.tokenizer, "model_max_length") and self.tokenizer.model_max_length >= 512 else 77
+        
+        safe_tokens_length = len(self.safe_tokens)
+        max_length = max_length_default - safe_tokens_length if add_soft_token else max_length_default
+        
+        tokenized = self.tokenizer(prompt, truncation=True, max_length=max_length, return_tensors="pt")
+        base_prompt = self.tokenizer.decode(tokenized["input_ids"][0], skip_special_tokens=True)
+        
+        if add_soft_token:
+            if self.position == "start":
+                return f"{' '.join(self.safe_tokens)} {base_prompt}"
+            else:
+                return f"{base_prompt} {' '.join(self.safe_tokens)}"
+        else:
+            return base_prompt
+    
+    def generate_images(
+        self,
+        prompts: List[str],
+        output_dir: str,
+        batch_size: int = 1,
+        num_inference_steps: int = 28,
+        guidance_scale: float = 7.5,
+        seed: Optional[int] = None,
+        start_index: int = 0,
+        ids: Optional[List[int]] = None,
+    ):
+        """生成图像，支持动态插值"""
+        if start_index >= len(prompts):
+            print(f"Warning: start_index {start_index} is out of range. Total prompts: {len(prompts)}")
+            return
+
+        if seed is not None:
+            torch.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)
+            np.random.seed(seed)
+            random.seed(seed)
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+
+        generator = None if seed is None else torch.Generator(device=self.device).manual_seed(seed)
+        os.makedirs(output_dir, exist_ok=True)
+
+        total = len(prompts) - start_index
+        batches = (total + batch_size - 1) // batch_size
+
+        # 使用predictor获取scores
+        if self.args.predict_type == "polarization":
+            scores = self.predictor.predict_polarization(prompts)
+        elif self.args.predict_type == "realvalue":
+            scores = self.predictor.predict_realvalue(prompts)
+        elif self.args.predict_type == "emphasis_defense":
+            scores = self.predictor.predict_emphasis_defense(prompts)
+        elif self.args.predict_type == "emphasis_benign":
+            scores = self.predictor.predict_emphasis_benign(prompts)
+        else:
+            scores = [1.0] * len(prompts)
+
+        for batch_idx in tqdm(range(batches), desc=f"Generating images on {self.device}"):
+            batch_start = start_index + batch_idx * batch_size
+            batch_end = min(batch_start + batch_size, len(prompts))
+            batch_prompts = prompts[batch_start:batch_end]
+
+            processed_prompts = []
+
+            for i, prompt in enumerate(batch_prompts):
+                score = scores[batch_start + i] if scores is not None else 1.0
+
+                # 如果启用了detective模式，当score小于0.1时，直接卸载soft token
+                if self.args.enbale_detactive and score < 0.1:
+                    processed_prompt = self.process_prompt(prompt, add_soft_token=False)
+                else:
+                    # 动态插值：根据score在原始embedding和soft embedding之间插值
+                    interpolated = (1 - score) * self.original_embedding + score * self.soft_embedding
+                    with torch.no_grad():
+                        for j, token_id in enumerate(self.token_ids):
+                            self.embedding_layer.weight[token_id] = interpolated[j].to(self.device)
+                    processed_prompt = self.process_prompt(prompt, add_soft_token=True)
+
+                processed_prompts.append(processed_prompt)
+
+            # 执行推理
+            images = self.pipe(
+                processed_prompts,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+                generator=generator,
+            ).images
+
+            # 保存图像
+            for i, img in enumerate(images):
+                img_idx = batch_start + i
+                img_id = ids[img_idx] if ids is not None else img_idx
+                img.save(os.path.join(output_dir, f"{img_id}.png"))
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate images from prompts using Stable Diffusion")
     parser.add_argument("--input_files", nargs="+", required=True, help="Input CSV file paths")
@@ -630,8 +885,8 @@ def main():
         pipeline = SDXLPipeline(args, device)
     elif args.pipeline_type == "safegen":
         pipeline = SafeGenPipeline(args, device, args.safety_config)
-    elif args.pipeline_type == "sld":
-        pipeline = SLD_Pipeline(args, device, args.safety_config)
+    # elif args.pipeline_type == "sld":
+    #     pipeline = SLD_Pipeline(args, device, args.safety_config)
     elif args.pipeline_type == "mace":
         pipeline = MACEPipeline(args, device)
     elif args.pipeline_type == "uce":
@@ -642,6 +897,12 @@ def main():
         pipeline = OursPipeline(args, device)
     elif args.pipeline_type == "ours_dynamic":
         pipeline = OursDynamicPipeline(args, device)
+    elif args.pipeline_type == "ours_flux":
+        pipeline = OursFluxPipeline(args, device)
+    elif args.pipeline_type == "ours_dynamic_flux":
+        pipeline = OursDynamicFluxPipeline(args, device)
+    elif args.pipeline_type == "baseline_flux":
+        pipeline = BaselineFluxPipeline(args, device)
     else:
         raise ValueError(f"Unknown pipeline type: {args.pipeline_type}")
     

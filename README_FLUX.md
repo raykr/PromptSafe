@@ -190,6 +190,115 @@ python main_flux.py \
     --margin_coef 0.1
 ```
 
+## 推理（Inference）
+
+训练完成后，可以使用`evaluate.py`进行推理。Flux版本提供了三个pipeline类型：
+
+### 0. BaselineFluxPipeline (`baseline_flux`)
+
+不加任何防御的baseline推理，用于对比实验：
+
+```bash
+python evaluate.py \
+    --input_files datasets/test/pg_sexual_toxic.csv \
+    --prompt_field "prompt" \
+    --output_dir results/flux_baseline \
+    --model_path "black-forest-labs/FLUX.1-dev" \
+    --num_inference_steps 28 \
+    --guidance_scale 7.5 \
+    --batch_size 1 \
+    --pipeline_type "baseline_flux" \
+    --seed 42
+```
+
+**注意**: baseline不需要`--safe_embedding_paths`和`--safe_tokens`参数，直接使用原始模型进行推理。
+
+### 1. OursFluxPipeline (`ours_flux`)
+
+基础的Flux推理pipeline，加载训练好的textual inversion embeddings：
+
+```bash
+python evaluate.py \
+    --input_files datasets/test/pg_sexual_toxic.csv \
+    --prompt_field "prompt" \
+    --output_dir results/flux_sexual_toxic \
+    --model_path "black-forest-labs/FLUX.1-dev" \
+    --safe_embedding_paths outputs/flux_sexual_toxic/learned_embeds-steps-5000.safetensors \
+    --safe_token "<safety>" \
+    --position "start" \
+    --num_inference_steps 28 \
+    --guidance_scale 7.5 \
+    --batch_size 1 \
+    --pipeline_type "ours_flux" \
+    --seed 42
+```
+
+### 2. OursDynamicFluxPipeline (`ours_dynamic_flux`)
+
+动态推理pipeline，根据prompt的有毒程度动态调整防御强度：
+
+```bash
+python evaluate.py \
+    --input_files datasets/test/pg_sexual_toxic.csv \
+    --prompt_field "prompt" \
+    --output_dir results/flux_sexual_toxic_dynamic \
+    --model_path "black-forest-labs/FLUX.1-dev" \
+    --predictor_path out/gated_network_v0 \
+    --safe_embedding_paths outputs/flux_sexual_toxic/learned_embeds-steps-5000.safetensors \
+    --safe_token "<safety>" \
+    --position "start" \
+    --num_inference_steps 28 \
+    --guidance_scale 7.5 \
+    --batch_size 1 \
+    --pipeline_type "ours_dynamic_flux" \
+    --predict_type "realvalue" \
+    --enbale_detactive \
+    --seed 42
+```
+
+### 参数说明
+
+- `--pipeline_type`: 选择`baseline_flux`（baseline）、`ours_flux`（基础防御）或`ours_dynamic_flux`（动态防御）
+- `--safe_embedding_paths`: 训练好的embeddings路径（可以是多个，对应多个token）
+- `--safe_tokens`: 对应的token列表（如`"<safety>"`或`"<sexual>" "<violent>"`等）
+- `--position`: token位置，`"start"`或`"end"`
+- `--predictor_path`: 预测器模型路径（仅`ours_dynamic_flux`需要）
+- `--predict_type`: 预测类型，可选`"realvalue"`, `"polarization"`, `"emphasis_defense"`, `"emphasis_benign"`
+- `--enbale_detactive`: 启用检测模式，当score < 0.1时完全移除防御token
+
+### 多类别防御
+
+如果训练了多个类别的embeddings（如sexual、violent、political、disturbing），可以同时加载：
+
+```bash
+python evaluate.py \
+    --input_files datasets/test/pg_sexual_toxic.csv \
+    --prompt_field "prompt" \
+    --output_dir results/flux_merged \
+    --model_path "black-forest-labs/FLUX.1-dev" \
+    --safe_embedding_paths \
+        outputs/flux_sexual/learned_embeds-steps-5000.safetensors \
+        outputs/flux_violent/learned_embeds-steps-5000.safetensors \
+        outputs/flux_political/learned_embeds-steps-5000.safetensors \
+        outputs/flux_disturbing/learned_embeds-steps-5000.safetensors \
+    --safe_token "<sexual>" "<violent>" "<political>" "<disturbing>" \
+    --position "start" \
+    --pipeline_type "ours_dynamic_flux" \
+    --predictor_path out/gated_network_v0 \
+    --predict_type "realvalue" \
+    --enbale_detactive
+```
+
+### 注意事项
+
+1. **Text Encoder选择**: Flux使用dual encoder（CLIP + T5），代码会自动检测并使用T5 encoder（`text_encoder_2`）加载embeddings。如果模型没有T5 encoder，会回退到CLIP encoder。
+
+2. **Tokenizer差异**: T5 tokenizer支持512 tokens，CLIP支持77 tokens。代码会自动选择合适的tokenizer。
+
+3. **内存需求**: Flux模型推理也需要较多GPU内存，建议使用较小的batch size（如1-2）。
+
+4. **生成参数**: Flux模型的默认guidance_scale可能与SD1.4不同，建议根据实际情况调整。
+
 ## 参考
 
 - [Flux模型文档](https://huggingface.co/black-forest-labs/FLUX.1-dev)
