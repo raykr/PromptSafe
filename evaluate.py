@@ -214,7 +214,7 @@ class BaseInferencePipeline(ABC):
         self.args = args
         self.model_path = args.model_path
         self.device = device
-        self.tokenizer = CLIPTokenizer.from_pretrained("/home/beihang/jzl/models/openai/clip-vit-large-patch14")
+        self.tokenizer = CLIPTokenizer.from_pretrained("/home/raykr/models/openai/clip-vit-large-patch14")
         self.pipe = None
         self.safety_config = None
         self.setup_pipeline()
@@ -856,7 +856,8 @@ def main():
     parser.add_argument("--enbale_detactive", action="store_true", help="whether to enable detactive")
     parser.add_argument("--safe_embedding_paths", nargs="+", help="Paths to the safe embeddings")
     parser.add_argument("--soft_prompt_module_path", help="Path to the soft prompt module")
-    parser.add_argument("--safe_tokens", nargs="+", help="Safe tokens for defense")
+    parser.add_argument("--safe_tokens", nargs="+", help="Safe tokens for defense (for SD3.5: first token used as placeholder_token if --placeholder_token not set)")
+    parser.add_argument("--placeholder_token", default=None, help="Placeholder token name for SD3.5 (e.g. <safety>), must match training; defaults to first safe_token")
     parser.add_argument("--position", default="end", choices=["start", "end"], help="Position of the safe tokens")
     parser.add_argument("--num_inference_steps", type=int, default=50, help="Number of inference steps")
     parser.add_argument("--guidance_scale", type=float, default=7.5, help="Guidance scale")
