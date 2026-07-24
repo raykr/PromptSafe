@@ -258,6 +258,14 @@ $RECYCLE.BIN/
 *.gzip
 *.tgz
 *.bzip
+
+
+##### Project runtime artifacts #####
+# Keep generated checkpoints/logs and host-local monitoring utilities out of
+# the reproducible source milestone.
+/outputs/
+/nohup.out
+/gpu_monitor_*.py
 *.bzip2
 *.bz2
 *.xz

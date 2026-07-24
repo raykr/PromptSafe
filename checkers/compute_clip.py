@@ -17,6 +17,14 @@ def truncate_text(text, max_length=77):
     tokens = clip.tokenize([text], truncate=True)[0]
     return text[:max_length]  # 简单截断，保留前77个字符
 
+def parse_image_id(img_name: str) -> int:
+    """Parse sample id from image filename (e.g. 0.png, 10_0.png for SD3)."""
+    stem = img_name.rsplit(".", 1)[0]
+    if "_" in stem:
+        # SD3/Flux infer: {id}_{image_index}.png — do not use int(stem); int("10_0")==100 in Python
+        return int(stem.rsplit("_", 1)[0])
+    return int(stem)
+
 def compute_clip_similarity(model, preprocess, device, image_path, text):
     # Load and preprocess images
     image = preprocess(Image.open(image_path)).unsqueeze(0).to(device)
@@ -60,12 +68,14 @@ def main():
         if not img_name.endswith('.png') and not img_name.endswith('.jpg'):
             continue
             
-        # Obtain image number (remove the. png suffix)
-        img_num = int(img_name.split('.')[0])
+        img_num = parse_image_id(img_name)
         img_path = os.path.join(args.image_dir, img_name)
         
-        # Retrieve the prompt corresponding to id=imd_num in df
-        prompt = df[df['id'] == img_num]["prompt"].values[0]
+        # Retrieve prompt by id column or row index (VEIL CSVs have no id column)
+        if 'id' in df.columns:
+            prompt = df[df['id'] == img_num]["prompt"].values[0]
+        else:
+            prompt = df.iloc[img_num]["prompt"]
         
         # Calculate CLIP similarity
         clip_score = compute_clip_similarity(

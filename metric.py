@@ -267,9 +267,9 @@ if __name__ == "__main__":
             if field in fieldnames:
                 fieldnames.remove(field)
         
-        # 按指定顺序插入优先级字段
+        # 按指定顺序插入优先级字段（检查所有行，避免首行无 check 字段时漏列）
         for field in reversed(priority_fields):
-            if field in csv_data_list[0].keys():  # 只添加实际存在的字段
+            if any(field in data for data in csv_data_list):
                 fieldnames.insert(0, field)
         
         # 写入CSV文件（覆盖模式）
